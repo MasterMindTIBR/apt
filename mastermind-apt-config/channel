@@ -1,0 +1,6 @@
+# Canal do repositório APT da MasterMind: stable ou testing.
+#   stable  -> só releases promovidas (produção)
+#   testing -> stable + pre-releases (lab)
+# Não edite à mão: use "mastermind-apt-channel <stable|testing>", que também
+# regenera /etc/apt/sources.list.d/mastermind.sources.
+stable

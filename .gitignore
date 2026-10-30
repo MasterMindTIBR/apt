@@ -1,0 +1,12 @@
+# Saídas de build (nunca versionar)
+/public/
+/work/
+/dist/
+*.deb
+
+# Material de chave local. A única chave versionada é a pública
+# keys/mastermind-archive.asc. Chave privada NUNCA entra no repositório.
+*.key
+*.sec
+*secret*.asc
+*private*.asc

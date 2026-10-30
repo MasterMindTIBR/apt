@@ -1,0 +1,7 @@
+# Instalado pelo mastermind-apt-config. Faz o apt preferir os builds com o
+# patch ntfs3g publicados pela MasterMind (pve-file-restore-ntfs3g) e nunca
+# trocá-los sozinho pelos oficiais da Proxmox. 990 < 1000: não força downgrade
+# de uma versão oficial maior que já esteja instalada.
+Package: proxmox-backup-file-restore proxmox-backup-restore-image
+Pin: release o=MasterMind
+Pin-Priority: 990

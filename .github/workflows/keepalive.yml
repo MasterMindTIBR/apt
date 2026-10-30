@@ -1,0 +1,34 @@
+# O GitHub desativa workflows agendados de repositório público depois de 60
+# dias sem atividade no repositório. Este repo pode ficar meses sem commit,
+# e o schedule do publish.yml é o que traz as releases do ntfs3g (que não
+# avisa). Uma vez por mês, reativa pela API o publish.yml e este workflow,
+# o que reinicia a contagem. Se mesmo assim o schedule parar, reative em
+# Actions -> publish -> "Enable workflow".
+name: keepalive
+
+on:
+  schedule:
+    - cron: "41 6 1 * *"
+  workflow_dispatch:
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  keepalive:
+    name: Manter o agendamento ativo
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - name: Reativar workflows agendados
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for wf in publish.yml keepalive.yml; do
+            gh api --method PUT "repos/$GITHUB_REPOSITORY/actions/workflows/$wf/enable"
+            echo "$wf: ativo"
+          done

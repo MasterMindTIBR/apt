@@ -1,0 +1,40 @@
+# Verificações estáticas em PR e push: sintaxe e shellcheck dos scripts,
+# YAML, actions fixadas por SHA, imagem debian:13 consistente etc.
+# (scripts/lint.sh). Não usa secrets.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:13@sha256:2dc419c6d7fe3dad0a2f9fd469c34cc90b0f9ba642d8fde837fe3d7d34a0e7f1
+    permissions:
+      contents: read
+    steps:
+      - name: Instalar git
+        run: apt-get update -q && apt-get install -y -q --no-install-recommends ca-certificates git
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Instalar ferramentas
+        run: scripts/install-build-deps.sh
+
+      - name: Lint
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          scripts/lint.sh

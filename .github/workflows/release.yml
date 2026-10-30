@@ -1,0 +1,138 @@
+# Release do pacote mastermind-apt-config.
+#
+# Tag mastermind-apt-config/<versão> (igual ao mastermind-apt-config/VERSION)
+#   -> build do .deb no debian:13
+#   -> GitHub Release como PRE-RELEASE (canal testing) com exatamente
+#      mastermind-apt-config_<versão>_all.deb e SHA256SUMS
+#   -> dispara o publish.yml na main.
+#
+# Por que workflow_dispatch e não workflow_call: uma release criada com o
+# GITHUB_TOKEN não dispara outros workflows (workflow_dispatch é exceção), e
+# um workflow chamado daqui herdaria a ref da tag, que os environments
+# apt-publish e github-pages (restritos à main) recusam.
+name: release
+
+on:
+  push:
+    tags:
+      - "mastermind-apt-config/*"
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Montar .deb
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:13@sha256:2dc419c6d7fe3dad0a2f9fd469c34cc90b0f9ba642d8fde837fe3d7d34a0e7f1
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Instalar git
+        run: apt-get update -q && apt-get install -y -q --no-install-recommends ca-certificates git
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Instalar ferramentas
+        run: scripts/install-build-deps.sh
+
+      - name: Versão da tag
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#mastermind-apt-config/}"
+          case "$version" in
+            ""|*[!A-Za-z0-9.+~-]*) echo "::error::tag inválida: $TAG"; exit 1 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Montar
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          scripts/build-deb.sh --out dist --version "$VERSION"
+          deb="dist/mastermind-apt-config_${VERSION}_all.deb"
+          test "$(dpkg-deb -f "$deb" Version)" = "$VERSION"
+          test "$(ls dist | sort | tr '\n' ' ')" = "SHA256SUMS mastermind-apt-config_${VERSION}_all.deb "
+          dpkg-deb -I "$deb"
+          dpkg-deb -c "$deb"
+
+      - name: Notas da release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p work
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md > work/notes.md
+          if [ ! -s work/notes.md ]; then
+            echo "::error::CHANGELOG.md sem a seção '## [$VERSION]'"
+            exit 1
+          fi
+
+      - name: Guardar
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: |
+            dist/
+            work/notes.md
+          retention-days: 7
+          if-no-files-found: error
+
+  release:
+    name: Criar pre-release e publicar
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Baixar
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: out
+
+      - name: Criar a release (pre-release = testing)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          cd out
+          (cd dist && sha256sum -c SHA256SUMS)
+          files=("dist/mastermind-apt-config_${VERSION}_all.deb" dist/SHA256SUMS)
+          if state=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease 2>/dev/null); then
+            if [ "$state" != "true" ]; then
+              echo "::error::$TAG já foi promovida; uma release promovida nunca é alterada. Crie uma versão nova."
+              exit 1
+            fi
+            echo "Release $TAG já existe (pre-release): reenviando os assets."
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease \
+              --title "mastermind-apt-config $VERSION" --notes-file work/notes.md "${files[@]}"
+          fi
+
+      - name: Disparar o publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref main

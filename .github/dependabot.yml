@@ -1,0 +1,8 @@
+# Atualiza os SHAs das actions fixadas. A imagem debian:13 (digest) é
+# atualizada à mão: ver o comentário no Makefile.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

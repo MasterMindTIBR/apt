@@ -1,0 +1,125 @@
+#!/bin/sh
+# mastermind-apt-channel: escolhe o canal do repositório APT da MasterMind e
+# regenera /etc/apt/sources.list.d/mastermind.sources.
+#
+#   mastermind-apt-channel                 mostra o canal atual
+#   mastermind-apt-channel stable          só releases promovidas
+#   mastermind-apt-channel testing         stable + pre-releases (lab)
+#   mastermind-apt-channel --regenerate    reescreve o .sources a partir de
+#                                          /etc/mastermind-apt/channel (postinst)
+#
+# Não roda apt-get update sozinho. Idempotente: só grava o que mudou.
+set -eu
+
+CHANNEL_FILE=/etc/mastermind-apt/channel
+SOURCES_FILE=/etc/apt/sources.list.d/mastermind.sources
+KEYRING=/usr/share/keyrings/mastermind-archive.gpg
+URI=https://apt.mastermindti.cloud/debian
+SUITE=trixie
+
+usage() {
+	echo "Uso: mastermind-apt-channel [stable|testing|--regenerate]"
+}
+
+# Primeira linha útil do arquivo de canal; vazio se não existir.
+read_channel() {
+	[ -r "$CHANNEL_FILE" ] || return 0
+	sed -e 's/#.*//' -e 's/[[:space:]]//g' "$CHANNEL_FILE" | awk 'NF && !n++'
+}
+
+components_for() {
+	case $1 in
+	stable) echo "stable" ;;
+	testing) echo "stable testing" ;;
+	*) return 1 ;;
+	esac
+}
+
+# Grava $2 em $1 de forma atômica, só se o conteúdo mudou. Saída 0 = mudou.
+write_if_changed() {
+	target=$1
+	content=$2
+	if [ -f "$target" ] && [ "$(cat "$target")" = "$content" ]; then
+		return 1
+	fi
+	dir=$(dirname "$target")
+	mkdir -p "$dir"
+	# Temporário oculto no mesmo diretório: o apt ignora arquivos com ponto.
+	tmp=$(mktemp "$dir/.$(basename "$target").XXXXXX")
+	printf '%s\n' "$content" >"$tmp"
+	chmod 0644 "$tmp"
+	mv -f "$tmp" "$target"
+	return 0
+}
+
+render_sources() {
+	cat <<SOURCES
+# Gerado por mastermind-apt-channel (pacote mastermind-apt-config).
+# Não edite: troque o canal com "mastermind-apt-channel <stable|testing>".
+Types: deb
+URIs: $URI
+Suites: $SUITE
+Components: $(components_for "$1")
+Signed-By: $KEYRING
+SOURCES
+}
+
+render_channel() {
+	# Mantém o cabeçalho de comentários do arquivo atual.
+	if [ -r "$CHANNEL_FILE" ]; then
+		grep '^#' "$CHANNEL_FILE" || true
+	fi
+	echo "$1"
+}
+
+regenerate() {
+	channel=$(read_channel)
+	if ! components_for "$channel" >/dev/null 2>&1; then
+		echo "mastermind-apt-channel: canal inválido em $CHANNEL_FILE ('$channel'); usando stable." >&2
+		channel=stable
+	fi
+	if write_if_changed "$SOURCES_FILE" "$(render_sources "$channel")"; then
+		echo "mastermind-apt-channel: $SOURCES_FILE atualizado (canal $channel)."
+	fi
+}
+
+need_root() {
+	if [ "$(id -u)" != 0 ]; then
+		echo "mastermind-apt-channel: precisa de root." >&2
+		exit 1
+	fi
+}
+
+case ${1:-} in
+"")
+	channel=$(read_channel)
+	echo "canal: ${channel:-desconhecido}"
+	if [ -r "$SOURCES_FILE" ]; then
+		sed -n 's/^Components: */componentes: /p' "$SOURCES_FILE"
+	else
+		echo "componentes: ($SOURCES_FILE ausente)"
+	fi
+	;;
+--regenerate)
+	need_root
+	regenerate
+	;;
+stable | testing)
+	need_root
+	if [ "$(read_channel)" = "$1" ] && [ -f "$SOURCES_FILE" ]; then
+		regenerate
+		echo "Canal já é $1."
+		exit 0
+	fi
+	write_if_changed "$CHANNEL_FILE" "$(render_channel "$1")" || true
+	regenerate
+	echo "Canal agora é $1. Rode 'apt-get update'."
+	;;
+-h | --help)
+	usage
+	;;
+*)
+	usage >&2
+	exit 2
+	;;
+esac

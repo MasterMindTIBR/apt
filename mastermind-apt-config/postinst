@@ -1,0 +1,12 @@
+#!/bin/sh
+# postinst do mastermind-apt-config: gera o .sources a partir do canal
+# configurado em /etc/mastermind-apt/channel (conffile). Sem perguntas.
+set -e
+
+case "$1" in
+configure)
+	/usr/sbin/mastermind-apt-channel --regenerate
+	;;
+esac
+
+exit 0

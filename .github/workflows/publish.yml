@@ -1,0 +1,215 @@
+# Monta, verifica, assina e publica o repositório APT no GitHub Pages
+# (https://apt.mastermindti.cloud/debian).
+#
+# É o ÚNICO workflow que escreve o índice. A cada execução tudo é reconstruído
+# a partir das GitHub Releases listadas no sources.yml (todos os repositórios
+# de origem são públicos, então a leitura não precisa de credencial).
+#
+# Gatilhos:
+#   repository_dispatch (release-published): enviado pelo release/promote do
+#     mm-pve-tools (token do GitHub App), e pelo release/promote deste repo
+#     (via workflow_dispatch com o GITHUB_TOKEN);
+#   schedule: de hora em hora (pega o ntfs3g, que não avisa, e dispatch perdido);
+#   workflow_dispatch: manual.
+name: publish
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  repository_dispatch:
+    types: [release-published]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Publicar mesmo se o conteúdo não mudou"
+        type: boolean
+        default: false
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+# Uma publicação por vez; a próxima espera (não cancela a que está rodando).
+concurrency:
+  group: apt-publish
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Montar e verificar
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:13@sha256:2dc419c6d7fe3dad0a2f9fd469c34cc90b0f9ba642d8fde837fe3d7d34a0e7f1
+    permissions:
+      contents: read
+    outputs:
+      stable_broken: ${{ steps.stable.outputs.broken }}
+    steps:
+      - name: Instalar git
+        run: apt-get update -q && apt-get install -y -q --no-install-recommends ca-certificates git
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Instalar ferramentas
+        run: scripts/install-build-deps.sh
+
+      - name: Montar o repositório (sem assinatura)
+        env:
+          # Só para o limite da API (1000/h em vez de 60/h); leitura pública.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/build-repo.sh --out public --require-key
+
+      - name: Dependências do canal testing
+        id: testing
+        continue-on-error: true
+        run: scripts/check-deps.sh --repo public --channel testing --report work/depcheck-testing.md
+
+      - name: Aviso (testing)
+        if: steps.testing.outcome == 'failure'
+        run: |
+          echo "::warning::O canal testing tem dependências não satisfeitas (publicado mesmo assim; ver relatório)."
+          cat work/depcheck-testing.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Dependências do canal stable
+        id: stable
+        run: |
+          rc=0
+          scripts/check-deps.sh --repo public --channel stable --report work/depcheck-stable.md || rc=$?
+          cat work/depcheck-stable.md >> "$GITHUB_STEP_SUMMARY" || true
+          if [ "$rc" -eq 1 ]; then
+            echo "broken=true" >> "$GITHUB_OUTPUT"
+            echo "::error::O canal stable ficaria com dependências não satisfeitas. Nada foi publicado."
+          fi
+          exit "$rc"
+
+      - name: Guardar relatório do stable
+        if: failure() && steps.stable.outputs.broken == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: depcheck-stable
+          path: work/depcheck-stable.md
+          retention-days: 14
+
+      - name: Guardar o repositório montado
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: repo-unsigned
+          path: public/
+          retention-days: 1
+          if-no-files-found: error
+
+  report:
+    name: Abrir issue (stable quebrado)
+    needs: build
+    if: failure() && needs.build.outputs.stable_broken == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - name: Baixar relatório
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: depcheck-stable
+          path: report
+
+      - name: Abrir issue (uma só por título)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="publish: canal stable com dependências não satisfeitas"
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 200 \
+            --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -n1)
+          if [ -n "$existing" ]; then
+            echo "Issue #$existing já aberta; não duplico."
+            exit 0
+          fi
+          {
+            echo "O publish recusou publicar: o canal \`stable\` ficaria com dependências não satisfeitas."
+            echo "Nada foi publicado; o APT continua servindo a versão anterior."
+            echo
+            echo "Run: $RUN_URL"
+            echo
+            cat report/depcheck-stable.md
+            echo
+            echo "Corrija promovendo a dependência que falta (ou voltando a release para pre-release) e rode o publish de novo."
+          } > body.md
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file body.md
+
+  sign:
+    name: Assinar
+    needs: build
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:13@sha256:2dc419c6d7fe3dad0a2f9fd469c34cc90b0f9ba642d8fde837fe3d7d34a0e7f1
+    environment: apt-publish
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - name: Instalar git
+        run: apt-get update -q && apt-get install -y -q --no-install-recommends ca-certificates git
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Instalar ferramentas
+        run: scripts/install-build-deps.sh
+
+      - name: Baixar o repositório montado
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: repo-unsigned
+          path: public
+
+      - name: Assinar (InRelease e Release.gpg)
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: scripts/sign-repo.sh --out public
+
+      - name: Comparar com o publicado
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          new=$(cat public/content-digest.txt)
+          old=$(curl -fsS --max-time 20 "https://apt.mastermindti.cloud/content-digest.txt?run=$GITHUB_RUN_ID" || true)
+          echo "digest novo: $new"
+          echo "digest publicado: ${old:-(nenhum)}"
+          if [ "$new" = "$old" ] && [ "$FORCE" != "true" ]; then
+            echo "Conteúdo igual ao publicado; nada a fazer."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Enviar artifact do Pages
+        if: steps.diff.outputs.changed == 'true'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: public/
+
+  deploy:
+    name: Publicar no Pages
+    needs: sign
+    if: needs.sign.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

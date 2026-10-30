@@ -1,0 +1,71 @@
+# Promove uma release do mastermind-apt-config de testing para stable
+# (tira o pre-release) e dispara o publish.yml.
+#
+# Roda no environment "production", que exige a aprovação do Jung. Só promova
+# depois de testar a versão no cluster de lab. Uma release promovida nunca é
+# editada de novo: correção vira versão nova.
+name: promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag da release (ex.: mastermind-apt-config/1.0.0)"
+        required: true
+        type: string
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: promote
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promover para stable
+    runs-on: ubuntu-24.04
+    environment: production
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Conferir a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          if [[ ! $TAG =~ ^mastermind-apt-config/[0-9][A-Za-z0-9.+~-]*$ ]]; then
+            echo "::error::tag inválida: '$TAG' (esperado mastermind-apt-config/<versão>)"
+            exit 1
+          fi
+          version=${TAG#mastermind-apt-config/}
+          info=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,assets)
+          if [ "$(jq -r .isDraft <<<"$info")" = "true" ]; then
+            echo "::error::$TAG é rascunho"; exit 1
+          fi
+          assets=$(jq -r '[.assets[].name] | sort | join(" ")' <<<"$info")
+          if [ "$assets" != "SHA256SUMS mastermind-apt-config_${version}_all.deb" ]; then
+            echo "::error::assets fora do contrato em $TAG: $assets"; exit 1
+          fi
+          echo "prerelease=$(jq -r .isPrerelease <<<"$info")" >> "$GITHUB_ENV"
+
+      - name: Tirar o pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          if [ "$prerelease" != "true" ]; then
+            echo "$TAG já está em stable; nada a mudar."
+          else
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false
+            echo "$TAG promovida para stable."
+          fi
+
+      - name: Disparar o publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref main

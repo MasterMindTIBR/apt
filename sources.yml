@@ -1,0 +1,52 @@
+# Repositórios de origem do APT da MasterMind.
+#
+# O publish.yml lê este arquivo a cada execução, lista as GitHub Releases de
+# cada repositório (todos públicos, sem token) e monta o índice do zero.
+#
+#   repo:      dono/nome no GitHub.
+#   packages:  pacotes aceitos daquele repositório. Qualquer outro .deb é
+#              ignorado. O nome, a versão e a arquitetura são lidos de dentro
+#              do .deb (campos Package, Version e Architecture), nunca do nome
+#              do arquivo nem da tag.
+#   tags:      formatos de tag que contam (padrão: [component]).
+#                component -> <componente>/<versão>  (ex.: meta/2.0.0)
+#                semver    -> v<semver>              (ex.: v0.1.0)
+#              Tags em outro formato (ex.: v1.0.0-pve9.2.11 do ntfs3g) são
+#              ignoradas.
+#
+# Canal: pre-release -> testing; release -> stable. Rascunhos são ignorados.
+
+# Versões mantidas de cada pacote em cada canal (as mais novas).
+keep_versions: 5
+
+sources:
+  - repo: MasterMindTIBR/mm-pve-tools
+    packages: [mm-pve-tools, mm-gw-restore]
+    tags: [component, semver]
+
+  - repo: MasterMindTIBR/apt
+    packages: [mastermind-apt-config]
+
+  - repo: junglivre/pve-file-restore-ntfs3g
+    packages:
+      - proxmox-backup-file-restore
+      - proxmox-backup-restore-image
+      - pve-file-restore-ntfs3g
+      - ntfs-3g-plugin-dedup
+
+# Verificação de dependências por canal (scripts/check-deps.sh).
+# Cada pacote aceito precisa aparecer em pelo menos um perfil.
+#   node:    Debian 13 + Proxmox VE pve-no-subscription + este repositório
+#   gateway: Debian 13 + Proxmox pbs-client + este repositório
+depcheck:
+  node:
+    - mastermind-apt-config
+    - mm-pve-tools
+    - proxmox-backup-file-restore
+    - proxmox-backup-restore-image
+    - pve-file-restore-ntfs3g
+    - ntfs-3g-plugin-dedup
+  gateway:
+    - mastermind-apt-config
+    - mm-gw-restore
+    - ntfs-3g-plugin-dedup

@@ -1,0 +1,15 @@
+Package: mastermind-apt-config
+Version: @VERSION@
+Architecture: all
+Maintainer: @MAINTAINER@
+Installed-Size: @INSTALLED_SIZE@
+Depends: apt (>= 3.0)
+Section: admin
+Priority: optional
+Homepage: https://github.com/MasterMindTIBR/apt
+Description: configuração do repositório APT da MasterMind TI
+ Instala a chave pública do repositório https://apt.mastermindti.cloud/debian,
+ o arquivo /etc/apt/sources.list.d/mastermind.sources (canal stable ou
+ testing, escolhido com mastermind-apt-channel) e o pin que faz o apt
+ preferir os builds proxmox-backup-file-restore e proxmox-backup-restore-image
+ publicados pela MasterMind.

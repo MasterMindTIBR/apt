@@ -1,0 +1,18 @@
+#!/bin/sh
+# postrm do mastermind-apt-config. O .sources é gerado (não pertence ao
+# pacote) e aponta para a chave que acabou de ser removida: sai junto, senão
+# o próximo apt-get update falha. O pin e o canal são conffiles e só saem no
+# purge.
+set -e
+
+case "$1" in
+remove | purge)
+	rm -f /etc/apt/sources.list.d/mastermind.sources
+	;;
+esac
+
+if [ "$1" = purge ]; then
+	rmdir /etc/mastermind-apt 2>/dev/null || true
+fi
+
+exit 0

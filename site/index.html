@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>APT MasterMind</title>
+<meta name="description" content="Repositório APT público da MasterMind TI para Proxmox VE 9 e Debian 13.">
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1d2129; --muted: #5b6270; --line: #dfe3ea;
+    --code-bg: #f4f6f9; --accent: #0b5cad; --warn-bg: #fff6e0; --warn-line: #e8c46a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14171c; --fg: #e4e7ec; --muted: #9aa3b2; --line: #2c323c;
+      --code-bg: #1d2128; --accent: #6cb0ff; --warn-bg: #2a2416; --warn-line: #7a6326;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14171c; --fg: #e4e7ec; --muted: #9aa3b2; --line: #2c323c;
+    --code-bg: #1d2128; --accent: #6cb0ff; --warn-bg: #2a2416; --warn-line: #7a6326;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 1.7rem; margin: 0 0 4px; }
+  h2 { font-size: 1.2rem; margin: 36px 0 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+  p.lead { color: var(--muted); margin-top: 0; }
+  a { color: var(--accent); }
+  code, pre { font: 0.88rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: 12px 14px; overflow-x: auto; white-space: pre;
+  }
+  pre code { background: none; padding: 0; }
+  .note { background: var(--warn-bg); border-left: 4px solid var(--warn-line); padding: 10px 14px; border-radius: 4px; }
+  .fpr { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.92rem; display: block; overflow-x: auto; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; }
+  footer { margin-top: 48px; color: var(--muted); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<main>
+<h1>Repositório APT da MasterMind TI</h1>
+<p class="lead">Pacotes para Proxmox VE 9 e Debian 13 (trixie): <code>mm-pve-tools</code>, <code>mm-gw-restore</code>,
+o File Restore com <code>ntfs-3g</code> e plugin de dedup, e a configuração deste repositório.</p>
+
+<ul>
+  <li>URL: <code>https://apt.mastermindti.cloud/debian</code>, distribuição <code>trixie</code></li>
+  <li>Componentes: <code>stable</code> (releases promovidas) e <code>testing</code> (pre-releases, para lab)</li>
+  <li>Chave: <a href="mastermind-archive.gpg">mastermind-archive.gpg</a>, impressão digital
+    <span class="fpr">@FINGERPRINT@</span></li>
+</ul>
+
+<h2>Cluster Proxmox VE: bootstrap</h2>
+<p>Como root, em qualquer node do cluster. O script instala o <code>mastermind-apt-config</code> (conferido pelo
+SHA256 da release), ajusta o canal e instala o <code>mm-pve-tools</code> em todos os nodes online.</p>
+<pre><code>curl -fsSLO https://apt.mastermindti.cloud/bootstrap-cluster.sh
+less bootstrap-cluster.sh                 # revise antes de rodar
+bash bootstrap-cluster.sh --check         # só leitura
+bash bootstrap-cluster.sh --dry-run       # mostra o plano
+bash bootstrap-cluster.sh                 # canal stable
+bash bootstrap-cluster.sh --channel testing   # lab</code></pre>
+<p>Gateway de restore (VM Debian 13), a partir de um node:</p>
+<pre><code>bash bootstrap-cluster.sh --gateway &lt;ip-ou-nome-do-gateway&gt;</code></pre>
+<p>Depois do bootstrap, as atualizações vêm com <code>apt full-upgrade</code>.</p>
+
+<h2>Instalação manual (um host)</h2>
+<pre><code>curl -fsSL https://apt.mastermindti.cloud/mastermind-archive.gpg \
+  -o /usr/share/keyrings/mastermind-archive.gpg
+# confira a impressão digital acima:
+gpg --show-keys /usr/share/keyrings/mastermind-archive.gpg
+
+cat &gt; /etc/apt/sources.list.d/mastermind.sources &lt;&lt;'EOF'
+Types: deb
+URIs: https://apt.mastermindti.cloud/debian
+Suites: trixie
+Components: stable
+Signed-By: /usr/share/keyrings/mastermind-archive.gpg
+EOF
+
+apt update
+apt install mastermind-apt-config     # assume a chave, o .sources e o pin
+apt install mm-pve-tools              # node do PVE (traz o ntfs3g)</code></pre>
+<p>O <code>mastermind-apt-config</code> instala o pin que faz o apt preferir os builds da MasterMind:</p>
+<pre><code>Package: proxmox-backup-file-restore proxmox-backup-restore-image
+Pin: release o=MasterMind
+Pin-Priority: 990</code></pre>
+
+<h2>Canal</h2>
+<pre><code>mastermind-apt-channel            # mostra o canal atual
+mastermind-apt-channel testing    # stable + pre-releases (lab)
+mastermind-apt-channel stable     # só releases promovidas
+apt update</code></pre>
+
+<h2>Voltar aos pacotes oficiais da Proxmox</h2>
+<pre><code>apt purge mm-pve-tools pve-file-restore-ntfs3g
+apt purge mastermind-apt-config       # remove .sources, chave e pin
+apt update
+apt install --allow-downgrades \
+  proxmox-backup-file-restore=&lt;versão-oficial&gt; \
+  proxmox-backup-restore-image=&lt;versão-oficial&gt;</code></pre>
+<p class="note">Use <code>apt-cache policy proxmox-backup-file-restore</code> para ver as versões oficiais disponíveis.</p>
+
+<h2>Pacotes publicados</h2>
+<!-- @PACKAGES@ -->
+
+<footer>
+  Montado a partir das GitHub Releases pelo repositório
+  <a href="https://github.com/MasterMindTIBR/apt">MasterMindTIBR/apt</a>.
+  Detalhes: <a href="manifest.json">manifest.json</a>.
+</footer>
+</main>
+</body>
+</html>
