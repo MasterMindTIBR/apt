@@ -8,8 +8,11 @@
 # FALSO (sem dependências, só um /usr/sbin/mm-pve), serve tudo por HTTPS como
 # se fosse apt.mastermindti.cloud (certificado autoassinado + /etc/hosts, só
 # no container), sobe um sshd e um pvesh falso com 3 nodes: nodeA (local),
-# localhost (via ssh de verdade) e nodeC (offline). Roda --check, --dry-run,
-# a instalação, uma segunda execução (idempotência) e o --gateway.
+# nodeB (via ssh de verdade) e nodeC (offline). Como num PVE 9, o nome nodeB não
+# resolve e a chave dele só está em /etc/pve/nodes/nodeB/ssh_known_hosts: o
+# bootstrap tem que chegar nele pelo IP do /cluster/status, como o PVE faz.
+# Roda --check, --dry-run, a instalação, uma segunda execução (idempotência) e
+# o --gateway.
 set -euo pipefail
 cd "$ROOT_DIR"
 [ -f /.dockerenv ] || { echo "ERRO: rode só em container (make test-bootstrap)" >&2; exit 1; }
@@ -19,13 +22,15 @@ done
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-server openssh-client perl openssl >/dev/null
 
-# 1. Cópia do repositório + mm-pve-tools falso (sem dependências, com mm-pve)
+# 1. Cópia do repositório + mm-pve-tools falso (sem dependências, com mm-pve).
+#    A versão fica acima de qualquer release real, senão o apt escolhe a real
+#    (que exige pve-manager) e a instalação no container não tem como passar.
 R=/srv/repo; rm -rf "$R"; cp -a public "$R"
 P=$(mktemp -d); mkdir -p "$P/DEBIAN" "$P/usr/sbin"
 printf '#!/bin/sh\necho "mm-pve status: ok (pacote falso de teste)"\n' > "$P/usr/sbin/mm-pve"; chmod 755 "$P/usr/sbin/mm-pve"
-printf 'Package: mm-pve-tools\nVersion: 0.0.1\nArchitecture: all\nMaintainer: teste <teste@invalid>\nDescription: falso\n' > "$P/DEBIAN/control"
+printf 'Package: mm-pve-tools\nVersion: 999.0.0\nArchitecture: all\nMaintainer: teste <teste@invalid>\nDescription: falso\n' > "$P/DEBIAN/control"
 mkdir -p "$R/debian/pool/testing/m/mm-pve-tools"
-dpkg-deb --root-owner-group --build "$P" "$R/debian/pool/testing/m/mm-pve-tools/mm-pve-tools_0.0.1_all.deb" >/dev/null
+dpkg-deb --root-owner-group --build "$P" "$R/debian/pool/testing/m/mm-pve-tools/mm-pve-tools_999.0.0_all.deb" >/dev/null
 d="$R/debian/dists/trixie"
 (cd "$R/debian" && apt-ftparchive --arch amd64 packages pool/testing) > "$d/testing/binary-amd64/Packages"
 gzip -9nc "$d/testing/binary-amd64/Packages" > "$d/testing/binary-amd64/Packages.gz"
@@ -50,26 +55,41 @@ s.socket = c.wrap_socket(s.socket, server_side=True); s.serve_forever()
 PY
 sleep 1
 
-# 3. sshd + chave root para "localhost"
+# 3. sshd + chave root. O gateway (localhost) usa o known_hosts comum; o nodeB,
+# como num PVE 9, só tem a chave no known_hosts do cluster, pelo nome do node.
 mkdir -p /run/sshd /root/.ssh && ssh-keygen -A >/dev/null && /usr/sbin/sshd
 ssh-keygen -q -t ed25519 -N '' -f /root/.ssh/id_ed25519 && cat /root/.ssh/id_ed25519.pub >> /root/.ssh/authorized_keys
 ssh-keyscan -q localhost >> /root/.ssh/known_hosts 2>/dev/null
+mkdir -p /etc/pve/nodes/nodeB
+ssh-keyscan -q 127.0.0.1 2>/dev/null | sed 's/^127\.0\.0\.1 /nodeB /' > /etc/pve/nodes/nodeB/ssh_known_hosts
 
-# 4. pvesh falso: nodeA (local), localhost (via ssh), nodeC (offline)
+# 4. pvesh falso: nodeA (local), nodeB (via ssh pelo IP), nodeC (offline)
 cat > /usr/local/bin/pvesh <<'J'
 #!/bin/sh
-echo '[{"type":"cluster","name":"lab","quorate":1},{"type":"node","name":"nodeA","online":1,"local":1},{"type":"node","name":"localhost","online":1,"local":0},{"type":"node","name":"nodeC","online":0,"local":0}]'
+echo '[{"type":"cluster","name":"lab","quorate":1},{"type":"node","name":"nodeA","online":1,"local":1,"ip":"127.0.0.1"},{"type":"node","name":"nodeB","online":1,"local":0,"ip":"127.0.0.1"},{"type":"node","name":"nodeC","online":0,"local":0,"ip":"127.0.0.2"}]'
 J
 chmod 755 /usr/local/bin/pvesh
+
+# Controle: o ssh comum pelo nome falha aqui, como num cluster PVE 9.
+if ssh -o BatchMode=yes -o ConnectTimeout=5 root@nodeB true 2>/dev/null; then
+	echo "ERRO: ssh comum para nodeB não devia funcionar neste teste" >&2; exit 1
+fi
 
 B=./bootstrap-cluster.sh
 debs=(dist/mastermind-apt-config_*_all.deb)
 DEB=${debs[0]}
-echo; echo "############ --check (antes)"; $B --check
+echo; echo "############ --check (antes)"; $B --check | tee /tmp/check-antes.txt
+grep -q '^nodeB ' /tmp/check-antes.txt || { echo "ERRO: nodeB fora do --check" >&2; exit 1; }
+if grep -q 'sem acesso' /tmp/check-antes.txt; then echo "ERRO: node sem acesso via ssh no --check" >&2; exit 1; fi
 echo; echo "############ --dry-run --channel testing"; $B --dry-run --channel testing --deb "$DEB"
-echo; echo "############ instalação --channel testing"; $B --channel testing --deb "$DEB" || echo "exit=$?"
+echo; echo "############ instalação --channel testing"; $B --channel testing --deb "$DEB" | tee /tmp/install.txt
+for n in nodeA nodeB; do
+	if ! grep -Eq "^$n .* 999\.0\.0$" /tmp/install.txt; then
+		echo "ERRO: $n sem mm-pve-tools 999.0.0 depois da instalação" >&2; exit 1
+	fi
+done
 echo; echo "############ segunda execução (idempotente)"; { $B --channel testing --deb "$DEB" || true; } 2>&1 | grep -E '^\s+\[|^==|^Pronto|ERRO|AVISO|^NODE|^node|^localhost'
-echo; echo "############ --gateway localhost (sem mm-gw-restore publicado: deve falhar com mensagem clara)"
+echo; echo "############ --gateway localhost (ssh comum, fora do cluster)"
 rc=0; $B --gateway localhost --channel testing --deb "$DEB" || rc=$?; echo "exit=$rc"
 cat /etc/apt/sources.list.d/proxmox-pbs-client.sources
 echo; echo "############ argumentos inválidos"
