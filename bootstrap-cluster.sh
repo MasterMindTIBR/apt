@@ -36,6 +36,7 @@ GATEWAY=""
 DEB_FILE=""
 LOCAL_NODE=""
 WORKDIR=""
+declare -A NODE_IP=() # node -> IP do /cluster/status (o PVE fala com os nodes pelo IP)
 
 usage() {
 	cat <<'EOF'
@@ -196,6 +197,25 @@ REMOTE
 # Execução local / remota
 # --------------------------------------------------------------------------
 
+# ssh_to HOST [ARGS...]: ssh como root no HOST. Para um node do cluster faz
+# como o próprio PVE 9 (PVE::SSHInfo): conecta no IP do /cluster/status e
+# confere a chave do host pelo known_hosts que o cluster mantém em
+# /etc/pve/nodes/<node>/ssh_known_hosts, com o nome do node como HostKeyAlias.
+# Assim o nome do node não precisa resolver em DNS, e o /etc/ssh/ssh_known_hosts
+# (que o PVE 9 não usa mais) não entra. A chave continua sendo verificada.
+# Sem esse arquivo (gateway, ou fora de um node PVE) usa o ssh comum.
+# shellcheck disable=SC2029 # quem chama valida os argumentos (on_host, copy_to)
+ssh_to() {
+	local host=$1 ip=${NODE_IP[$1]:-} known="/etc/pve/nodes/$1/ssh_known_hosts"
+	shift
+	if [[ -n $ip && -r $known ]]; then
+		ssh "${SSH_OPTS[@]}" -o "HostKeyAlias=$host" -o "UserKnownHostsFile=$known" \
+			-o GlobalKnownHostsFile=none "root@$ip" "$@"
+	else
+		ssh "${SSH_OPTS[@]}" "root@$host" "$@"
+	fi
+}
+
 # on_host HOST SCRIPT [ARGS...]: roda SCRIPT com bash no host (local sem ssh).
 # Os argumentos são validados (sem espaço nem metacaractere), então podem ir
 # na linha de comando do ssh sem aspas.
@@ -210,7 +230,7 @@ on_host() {
 		bash -s -- "$@" <<<"$script"
 	else
 		# shellcheck disable=SC2029 # args validados acima; expandir aqui é o objetivo
-		ssh "${SSH_OPTS[@]}" "root@$host" "bash -s --$args" <<<"$script"
+		ssh_to "$host" "bash -s --$args" <<<"$script"
 	fi
 }
 
@@ -222,7 +242,7 @@ copy_to() {
 		cp "$src" "$dest"
 	else
 		# shellcheck disable=SC2029 # $dest validado acima
-		ssh "${SSH_OPTS[@]}" "root@$host" "cat > $dest" <"$src"
+		ssh_to "$host" "cat > $dest" <"$src"
 	fi
 }
 
@@ -332,17 +352,19 @@ OFFLINE=() # listados mas offline
 
 discover_nodes() {
 	command -v pvesh >/dev/null 2>&1 || die "pvesh não encontrado: rode num node do Proxmox VE (ou use --gateway)"
-	local json name online is_local
+	local json name online is_local ip
 	json=$(pvesh get /cluster/status --output-format json) || die "pvesh get /cluster/status falhou"
-	while IFS=$'\t' read -r name online is_local; do
+	while IFS=$'\t' read -r name online is_local ip; do
 		[[ $name =~ ^[A-Za-z0-9.-]+$ ]] || die "nome de node inesperado: '$name'"
+		[[ $ip =~ ^[0-9A-Fa-f.:]*$ ]] || die "IP inesperado para o node $name: '$ip'"
+		NODE_IP[$name]=$ip
 		if [[ $is_local == 1 ]]; then LOCAL_NODE=$name; fi
 		if [[ $online == 1 ]]; then NODES+=("$name"); else OFFLINE+=("$name"); fi
 	done < <(perl -MJSON::PP -e '
 		my $d = decode_json(do { local $/; <STDIN> });
 		for my $e (@$d) {
 			next unless ($e->{type} // "") eq "node";
-			printf "%s\t%d\t%d\n", $e->{name}, $e->{online} // 0, $e->{local} // 0;
+			printf "%s\t%d\t%d\t%s\n", $e->{name}, $e->{online} // 0, $e->{local} // 0, $e->{ip} // "";
 		}' <<<"$json")
 	if [[ -z $LOCAL_NODE ]]; then LOCAL_NODE=$(uname -n); fi
 	[[ ${#NODES[@]} -gt 0 ]] || die "nenhum node online em /cluster/status"
@@ -354,13 +376,16 @@ host_status() {
 }
 
 print_table() {
-	local last_col=$1 h line cfg ch tools gw
+	local last_col=$1 h line cfg ch tools gw err why
 	shift
 	printf '%-24s %-24s %-9s %s\n' "NODE" "$CONFIG_PKG" "CANAL" "$last_col"
 	for h in "$@"; do
-		line=$(host_status "$h")
+		err=$(mktemp)
+		line=$(on_host "$h" "$REMOTE_STATUS" 2>"$err" || true)
+		why=$(tail -n 1 "$err" | tr -d '\r')
+		rm -f -- "$err"
 		if [[ -z $line ]]; then
-			printf '%-24s %s\n' "$h" "(sem acesso via ssh)"
+			printf '%-24s %s\n' "$h" "(sem acesso via ssh${why:+: $why})"
 			continue
 		fi
 		IFS='|' read -r cfg ch tools gw _ <<<"$line"
