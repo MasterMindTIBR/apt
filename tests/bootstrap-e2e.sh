@@ -70,6 +70,21 @@ echo '[{"type":"cluster","name":"lab","quorate":1},{"type":"node","name":"nodeA"
 J
 chmod 755 /usr/local/bin/pvesh
 
+# 5. Outro repositório quebrado, como o enterprise da Proxmox num node sem
+#    assinatura: responde 401. O bootstrap tem que avisar e instalar mesmo assim.
+python3 - <<'PY' &
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(401); self.send_header("Content-Length", "0"); self.end_headers()
+    def log_message(self, *a): pass
+http.server.ThreadingHTTPServer(("127.0.0.1", 8081), H).serve_forever()
+PY
+echo "127.0.0.1 repo-quebrado.invalid" >> /etc/hosts
+printf 'Types: deb\nURIs: http://repo-quebrado.invalid:8081/debian\nSuites: trixie\nComponents: main\n' \
+	> /etc/apt/sources.list.d/quebrado.sources
+sleep 1
+
 # Controle: o ssh comum pelo nome falha aqui, como num cluster PVE 9.
 if ssh -o BatchMode=yes -o ConnectTimeout=5 root@nodeB true 2>/dev/null; then
 	echo "ERRO: ssh comum para nodeB não devia funcionar neste teste" >&2; exit 1
@@ -82,7 +97,12 @@ echo; echo "############ --check (antes)"; $B --check | tee /tmp/check-antes.txt
 grep -q '^nodeB ' /tmp/check-antes.txt || { echo "ERRO: nodeB fora do --check" >&2; exit 1; }
 if grep -q 'sem acesso' /tmp/check-antes.txt; then echo "ERRO: node sem acesso via ssh no --check" >&2; exit 1; fi
 echo; echo "############ --dry-run --channel testing"; $B --dry-run --channel testing --deb "$DEB"
-echo; echo "############ instalação --channel testing"; $B --channel testing --deb "$DEB" | tee /tmp/install.txt
+echo; echo "############ instalação --channel testing (com um repositório 401)"
+$B --channel testing --deb "$DEB" 2>&1 | tee /tmp/install.txt
+grep -q 'AVISO: apt-get update falhou só em outro' /tmp/install.txt \
+	|| { echo "ERRO: o repositório 401 não gerou o aviso esperado" >&2; exit 1; }
+grep -q 'corrija ou desligue: http://repo-quebrado.invalid:8081/debian' /tmp/install.txt \
+	|| { echo "ERRO: o aviso não nomeou o repositório quebrado" >&2; exit 1; }
 for n in nodeA nodeB; do
 	if ! grep -Eq "^$n .* 999\.0\.0$" /tmp/install.txt; then
 		echo "ERRO: $n sem mm-pve-tools 999.0.0 depois da instalação" >&2; exit 1

@@ -168,8 +168,23 @@ fi
 
 # 4. apt
 say "apt-get update"
-apt-get -q update >/dev/null 2>"$tmp/update.err" || { cat "$tmp/update.err" >&2; say "ERRO: apt-get update falhou"; exit 1; }
-if grep -q '^[WE]:' "$tmp/update.err"; then
+if ! apt-get -q update >/dev/null 2>"$tmp/update.err"; then
+	# Erro só em OUTRO repositório (ex.: o enterprise da Proxmox num node sem
+	# assinatura, que responde 401) não impede instalar daqui: o índice da
+	# MasterMind atualizou e o apt usa os outros como estavam. Erro no nosso
+	# repositório, ou erro que não cita repositório nenhum (lock, disco), para.
+	errs=$(grep '^E:' "$tmp/update.err" || true)
+	if [ -z "$errs" ] || printf '%s\n' "$errs" | grep -qF apt.mastermindti.cloud ||
+		printf '%s\n' "$errs" | grep -qvE 'https?://'; then
+		cat "$tmp/update.err" >&2
+		say "ERRO: apt-get update falhou"
+		exit 1
+	fi
+	sed "s/^/  [$host] /" "$tmp/update.err" >&2
+	say "AVISO: apt-get update falhou só em outro(s) repositório(s), não no da MasterMind; a instalação segue."
+	printf '%s\n' "$errs" | grep -oE "https?://[^ ']+" | sed -E 's#/dists/.*$##' | sort -u |
+		while read -r url; do say "AVISO:   corrija ou desligue: $url"; done
+elif grep -q '^[WE]:' "$tmp/update.err"; then
 	sed "s/^/  [$host] /" "$tmp/update.err" >&2
 fi
 cand=$(apt-cache policy "$target" | awk '/Candidate:/ && !c { print $2; c = 1 }')
